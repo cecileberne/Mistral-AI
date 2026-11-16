@@ -40,6 +40,7 @@ OUTPUT_PLOT_DIR = Path("AFM_Graphs")
 OUTPUT_PLOT_DIR.mkdir(exist_ok=True)
 
 BLOCK_HEADER = "Parameters AFM"
+BLOCK_FALLBACK_HEADER = "Sample Name"
 
 # Libellés de paramètres de profil (1D) à extraire
 PROFILE_PARAMETERS = [
@@ -190,6 +191,29 @@ def row_cells(df, r):
     ]
 
 
+def find_block_starts(df):
+    """
+    Debut de chaque bloc image. Un bloc commence normalement par
+    'Parameters AFM' ; si cette cellule a ete supprimee lors d'un
+    nettoyage du fichier, la ligne 'Sample Name' qui suit immediatement
+    sert de delimiteur de secours (candidats a moins de 3 lignes d'ecart
+    fusionnes pour ne pas couper un bloc en deux).
+    """
+    candidates = []
+    for r in range(len(df)):
+        for c in range(df.shape[1]):
+            t = norm_txt(df.iloc[r, c])
+            if t == BLOCK_HEADER or t == BLOCK_FALLBACK_HEADER:
+                candidates.append(r)
+                break
+    merged = []
+    for r in candidates:
+        if merged and r - merged[-1] <= 2:
+            continue
+        merged.append(r)
+    return merged
+
+
 def extract_block(df, startrow, endrow, sheet):
     """Extrait tous les enregistrements d'un bloc (une image AFM)."""
     block_records = []
@@ -289,18 +313,13 @@ for sheet in xls.sheet_names:
 
     df = pd.read_excel(INPUT_FILE, sheet_name=sheet, header=None)
 
-    block_starts = [
-        (r, c)
-        for r in range(len(df))
-        for c in range(df.shape[1])
-        if norm_txt(df.iloc[r, c]) == BLOCK_HEADER
-    ]
+    block_starts = find_block_starts(df)
     print("Nombre d'images trouvées :", len(block_starts))
 
     image_counter = 0
 
-    for idx, (startrow, _) in enumerate(block_starts):
-        endrow = block_starts[idx + 1][0] if idx + 1 < len(block_starts) else len(df)
+    for idx, startrow in enumerate(block_starts):
+        endrow = block_starts[idx + 1] if idx + 1 < len(block_starts) else len(df)
 
         block_records, image_name, scan_size = extract_block(df, startrow, endrow, sheet)
 
@@ -442,7 +461,14 @@ for scan in data["ScanSize"].unique():
                             N=("Value", "count"))
                        .reset_index())
 
-        for i, row in stats_local.iterrows():
+        # Position entiere sur l'axe (l'index textuel du groupby ne se
+        # projette pas sur la bonne categorie)
+        tick_labels = [t.get_text() for t in ax.get_xticklabels()]
+        for i, label in enumerate(tick_labels):
+            row = stats_local[stats_local["Sample"] == label]
+            if row.empty:
+                continue
+            row = row.iloc[0]
             ax.text(i, -0.10, f"{row['Mean']:.2f}±{row['Std']:.2f}",
                     ha="center", va="top", fontsize=9,
                     transform=ax.get_xaxis_transform())
@@ -466,6 +492,9 @@ print(f"\nNombre total de graphiques générés : {len(generated_figures)}")
 
 with pd.ExcelWriter(OUTPUT_EXCEL, engine="openpyxl") as writer:
     data.to_excel(writer, sheet_name="Raw_Data", index=False)
+    counts_table = (data.groupby(["Sample", "ScanSize", "Parameter"])["Value"]
+                    .count().reset_index(name="Count"))
+    counts_table.to_excel(writer, sheet_name="Counts", index=False)
     stats_table.to_excel(writer, sheet_name="Statistics", index=False)
     tests_df.to_excel(writer, sheet_name="Statistical_Tests", index=False)
     ranking.to_excel(writer, sheet_name="Parameter_Ranking", index=False)
