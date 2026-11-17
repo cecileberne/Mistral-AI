@@ -17,6 +17,7 @@ position fixe n'est supposée. Tout est repéré par libellé :
     mécanisme ; les paramètres surfaciques sont rattachés au profil 0.
 """
 
+import sys
 from itertools import combinations
 from pathlib import Path
 
@@ -34,7 +35,7 @@ from openpyxl.drawing.image import Image as XLImage
 # USER SETTINGS
 # ======================================================================
 
-INPUT_FILE = "AFM-data-Ra-Sa.xlsx"
+INPUT_FILE = sys.argv[1] if len(sys.argv) > 1 else "AFM-data-Ra-Sa.xlsx"
 OUTPUT_EXCEL = "AFM_Report.xlsx"
 OUTPUT_PLOT_DIR = Path("AFM_Graphs")
 OUTPUT_PLOT_DIR.mkdir(exist_ok=True)
@@ -487,6 +488,109 @@ for scan in data["ScanSize"].unique():
 print(f"\nNombre total de graphiques générés : {len(generated_figures)}")
 
 # =====================================================================
+# BUBBLE PLOTS - SKEWNESS vs KURTOSIS (TAILLE DES BULLES = Sa / Ra)
+# =====================================================================
+
+BUBBLE_SIZES = (20, 500)
+
+
+def unit_of(parameter):
+    """Unite la plus frequente d'un parametre extrait ('a.u.' si ambigu)."""
+    units = data.loc[data["Parameter"] == parameter, "Unit"].dropna().astype(str)
+    units = units[units != ""].unique()
+    return units[0] if len(units) == 1 else "a.u."
+
+
+def bubble_plot(df, x, y, size, xlab, ylab, sizelab, title, fig_name):
+    """Nuage de bulles : x vs y, aire des bulles proportionnelle a `size`."""
+    plt.figure(figsize=(10, 8))
+    ax = sns.scatterplot(
+        data=df, x=x, y=y, hue="Sample", size=size,
+        sizes=BUBBLE_SIZES, palette="deep", alpha=0.7,
+        edgecolor="black", linewidth=0.5,
+    )
+    ax.axvline(0, color="grey", linestyle="--", linewidth=1)
+    ax.set_xlabel(xlab)
+    ax.set_ylabel(ylab)
+    plt.title(title)
+    plt.tight_layout()
+    plt.savefig(fig_name, dpi=300, bbox_inches="tight")
+    plt.close()
+
+
+# Niveau image : parametres surfaciques (1 valeur par image)
+surface_df = (
+    data[data["Profile"] == 0]
+    .pivot_table(index=["ScanSize", "Sample", "Image"],
+                 columns="Parameter", values="Value")
+    .reset_index()
+)
+
+# Niveau profil : parametres 1D (1 valeur par profil)
+profile_df = (
+    data[data["Profile"] > 0]
+    .pivot_table(index=["ScanSize", "Sample", "Image", "Profile"],
+                 columns="Parameter", values="Value")
+    .reset_index()
+)
+
+SURFACE_COLS = ["Skew (Ssk)", "Excess kurtosis", "Mean roughness (Sa)"]
+PROFILE_COLS = ["Skewness (Rsk)", "Kurtosis (Rku)", "Roughness average (Ra)"]
+
+bubble_figures = []
+
+for scan in data["ScanSize"].unique():
+    surf = surface_df[surface_df["ScanSize"] == scan]
+    prof = profile_df[profile_df["ScanSize"] == scan]
+
+    # Ssk vs Sku, bulles ~ Sa (1 point = 1 image)
+    if set(SURFACE_COLS).issubset(surf.columns):
+        sub = surf.dropna(subset=SURFACE_COLS)
+        if len(sub):
+            fig_name = OUTPUT_PLOT_DIR / f"Bubble_Ssk_vs_Sku_{scan}.png"
+            bubble_plot(
+                sub, "Skew (Ssk)", "Excess kurtosis", "Mean roughness (Sa)",
+                "Ssk", "Sku (excess kurtosis)",
+                f"Sa ({unit_of('Mean roughness (Sa)')})",
+                f"Ssk vs Sku - bubble area ~ Sa ({scan})",
+                fig_name,
+            )
+            bubble_figures.append(fig_name)
+            print("Bubble plot :", fig_name, f"({len(sub)} images)")
+
+    # Rsk vs Sku, bulles ~ Ra (1 point = 1 profil ; Sku est rattache
+    # a l'image parente)
+    if set(PROFILE_COLS).issubset(prof.columns) and "Excess kurtosis" in surf.columns:
+        sub = prof.dropna(subset=PROFILE_COLS).merge(
+            surf[["Sample", "Image", "Excess kurtosis"]],
+            on=["Sample", "Image"], how="inner",
+        ).dropna(subset=["Excess kurtosis"])
+        if len(sub):
+            fig_name = OUTPUT_PLOT_DIR / f"Bubble_Rsk_vs_Sku_{scan}.png"
+            bubble_plot(
+                sub, "Skewness (Rsk)", "Excess kurtosis",
+                "Roughness average (Ra)",
+                "Rsk", "Sku (excess kurtosis, per image)",
+                f"Ra ({unit_of('Roughness average (Ra)')})",
+                f"Rsk vs Sku - bubble area ~ Ra ({scan})",
+                fig_name,
+            )
+            bubble_figures.append(fig_name)
+            print("Bubble plot :", fig_name, f"({len(sub)} profils)")
+
+            # Variante classique : Rsk vs Rku (parametres 1D apparies)
+            fig_name = OUTPUT_PLOT_DIR / f"Bubble_Rsk_vs_Rku_{scan}.png"
+            bubble_plot(
+                sub, "Skewness (Rsk)", "Kurtosis (Rku)",
+                "Roughness average (Ra)",
+                "Rsk", "Rku", f"Ra ({unit_of('Roughness average (Ra)')})",
+                f"Rsk vs Rku - bubble area ~ Ra ({scan})",
+                fig_name,
+            )
+            bubble_figures.append(fig_name)
+            print("Bubble plot :", fig_name, f"({len(sub)} profils)")
+
+# =====================================================================
 # SAVE EXCEL REPORT
 # =====================================================================
 
@@ -516,6 +620,13 @@ for scan in ["2x2", "10x10"]:
             img.width, img.height = 550, 300
             ws.add_image(img, f"A{row_pos}")
             row_pos += 18
+
+for fig_file in bubble_figures:
+    if fig_file.exists():
+        img = XLImage(str(fig_file))
+        img.width, img.height = 550, 440
+        ws.add_image(img, f"A{row_pos}")
+        row_pos += 24
 
 wb.save(OUTPUT_EXCEL)
 
